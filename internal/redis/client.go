@@ -2,12 +2,12 @@ package redis
 
 import (
 	"context"
-	"encoding/json"
 	"go-websocket/internal/models"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/goccy/go-json"
 )
 
 type Client struct {
@@ -18,7 +18,8 @@ type Client struct {
 func NewClient(redisURL string) *Client {
 	opt, err := redis.ParseURL(redisURL)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error("Failed to parse Redis URL", "error", err)
+		panic(err)
 	}
 
 	rdb := redis.NewClient(opt)
@@ -26,15 +27,20 @@ func NewClient(redisURL string) *Client {
 
 	// Test connection
 	if err := rdb.Ping(ctx).Err(); err != nil {
-		log.Fatal("Failed to connect to Redis:", err)
+		slog.Error("Failed to connect to Redis", "error", err)
+		panic(err)
 	}
 
-	log.Println("Connected to Redis")
+	slog.Info("Connected to Redis")
 
 	return &Client{
 		rdb: rdb,
 		ctx: ctx,
 	}
+}
+
+func (c *Client) Close() error {
+	return c.rdb.Close()
 }
 
 // Publish events to Redis
@@ -107,22 +113,22 @@ func (c *Client) PublishPresenceLeave(channelId, userId string) error {
 func (c *Client) publishEvent(channelId string, event models.Event) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		log.Printf("[REDIS] Error marshaling event (type: %s, channelId: %s): %v", event.Type, channelId, err)
+		slog.Error("[REDIS] Error marshaling event", "type", event.Type, "channel", channelId, "error", err)
 		return err
 	}
 
 	// Publish to channel-specific Redis channel
 	channel := "channel:" + channelId
-	log.Printf("[REDIS] Publishing event (type: %s, channel: %s, payload size: %d bytes)", event.Type, channel, len(payload))
+	// slog.Debug("[REDIS] Publishing event", "type", event.Type, "channel", channel, "size", len(payload))
 
 	result := c.rdb.Publish(c.ctx, channel, payload)
 	if err := result.Err(); err != nil {
-		log.Printf("[REDIS] Error publishing event (type: %s, channel: %s): %v", event.Type, channel, err)
+		slog.Error("[REDIS] Error publishing event", "type", event.Type, "channel", channel, "error", err)
 		return err
 	}
 
-	subscribers := result.Val()
-	log.Printf("[REDIS] Event published successfully (type: %s, channel: %s, subscribers: %d)", event.Type, channel, subscribers)
+	// subscribers := result.Val()
+	// slog.Debug("[REDIS] Event published successfully", "type", event.Type, "channel", channel, "subscribers", subscribers)
 
 	return nil
 }

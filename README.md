@@ -22,17 +22,20 @@ A scalable real-time WebSocket server built with Go, Redis pub/sub, and Kinde au
 ### Using Docker (Recommended)
 
 1. **Clone and setup environment**:
+
    ```bash
    cp .env.example .env
    # Edit .env and add your KINDE_ISSUER_URL
    ```
 
 2. **Start all services**:
+
    ```bash
    docker-compose up -d
    ```
 
 3. **View logs**:
+
    ```bash
    docker-compose logs -f websocket-server
    ```
@@ -46,11 +49,13 @@ A scalable real-time WebSocket server built with Go, Redis pub/sub, and Kinde au
 ### Local Development
 
 1. **Start Redis only**:
+
    ```bash
    docker-compose -f docker-compose.dev.yml up -d
    ```
 
 2. **Set environment variables**:
+
    ```bash
    export KINDE_ISSUER_URL=https://your-subdomain.kinde.com
    export REDIS_URL=redis://localhost:6379
@@ -71,14 +76,18 @@ ws://localhost:8080/ws?token={JWT_TOKEN}&channelId={CHANNEL_ID}
 ```
 
 **Parameters:**
+
 - `token`: Kinde JWT access token (can also be sent in `Authorization` header)
 - `channelId`: Channel/room identifier to join
 
 **Example using JavaScript**:
+
 ```javascript
 const token = "your_kinde_jwt_token";
 const channelId = "channel_123";
-const ws = new WebSocket(`ws://localhost:8080/ws?token=${token}&channelId=${channelId}`);
+const ws = new WebSocket(
+  `ws://localhost:8080/ws?token=${token}&channelId=${channelId}`
+);
 
 ws.onopen = () => console.log("Connected");
 ws.onmessage = (event) => console.log("Message:", event.data);
@@ -89,17 +98,23 @@ ws.onmessage = (event) => console.log("Message:", event.data);
 ### Server → Client Events
 
 All events follow this structure:
+
 ```json
 {
   "type": "event_type",
   "channelId": "channel_id",
   "timestamp": 1234567890,
-  "data": { /* event-specific data */ }
+  "data": {
+    /* event-specific data */
+  }
 }
 ```
 
 **Event Types:**
+
 - `message:created` - New message in channel
+- `message:updated` - Message updated in channel
+- `message:deleted` - Message deleted from channel
 - `typing:start` - User started typing
 - `typing:stop` - User stopped typing
 - `presence:join` - User joined channel
@@ -108,6 +123,7 @@ All events follow this structure:
 ### Client → Server Events
 
 **Typing Indicator:**
+
 ```json
 {
   "type": "typing:start",
@@ -162,20 +178,22 @@ See [CLAUDE.md](./CLAUDE.md) for detailed architecture documentation.
 ## Docker Services
 
 ### Production (`docker-compose.yml`)
+
 - **websocket-server**: Go WebSocket server
 - **redis**: Redis 7 with persistence
 
 ### Development (`docker-compose.dev.yml`)
+
 - **redis**: Redis 7 for local development
 - **redis-commander**: Web UI for Redis debugging (http://localhost:8081)
 
 ## Environment Variables
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `KINDE_ISSUER_URL` | Your Kinde issuer URL | Yes | - |
-| `REDIS_URL` | Redis connection URL | Yes | `redis://localhost:6379` |
-| `PORT` | Server port | No | `8080` |
+| Variable           | Description           | Required | Default                  |
+| ------------------ | --------------------- | -------- | ------------------------ |
+| `KINDE_ISSUER_URL` | Your Kinde issuer URL | Yes      | -                        |
+| `REDIS_URL`        | Redis connection URL  | Yes      | `redis://localhost:6379` |
+| `PORT`             | Server port           | No       | `8080`                   |
 
 ## Health Check
 

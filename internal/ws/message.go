@@ -2,25 +2,25 @@ package ws
 
 import (
 	"go-websocket/internal/auth"
-	"log"
+	"log/slog"
 	"net/http"
 )
 
 func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	remoteAddr := r.RemoteAddr
-	log.Printf("[WS] New WebSocket connection request from %s", remoteAddr)
+	slog.Debug("[WS] New WebSocket connection request", "from", remoteAddr)
 
 	// Extract JWT token from query param or header
 	token := r.URL.Query().Get("token")
 	if token == "" {
 		token = r.Header.Get("Authorization")
-		log.Printf("[WS] Token from Authorization header (%s)", remoteAddr)
+		slog.Debug("[WS] Token from Authorization header", "from", remoteAddr)
 	} else {
-		log.Printf("[WS] Token from query parameter (%s)", remoteAddr)
+		slog.Debug("[WS] Token from query parameter", "from", remoteAddr)
 	}
 
 	if token == "" {
-		log.Printf("[WS] No token provided (%s)", remoteAddr)
+		slog.Warn("[WS] No token provided", "from", remoteAddr)
 		http.Error(w, "Unauthorized: token required", http.StatusUnauthorized)
 		return
 	}
@@ -28,22 +28,22 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	// Validate Kinde JWT token
 	claims, err := auth.ValidateToken(token)
 	if err != nil {
-		log.Printf("[WS] Token validation failed (%s): %v", remoteAddr, err)
+		slog.Warn("[WS] Token validation failed", "from", remoteAddr, "error", err)
 		http.Error(w, "Unauthorized: invalid token", http.StatusUnauthorized)
 		return
 	}
 
-	log.Printf("[WS] Token validated successfully (user: %s, email: %s, from: %s)", claims.Subject, claims.Email, remoteAddr)
+	slog.Info("[WS] Token validated successfully", "user", claims.Subject, "email", claims.Email, "from", remoteAddr)
 
 	// Extract channel ID from query
 	channelId := r.URL.Query().Get("channelId")
 	if channelId == "" {
-		log.Printf("[WS] No channelId provided (user: %s, from: %s)", claims.Subject, remoteAddr)
+		slog.Warn("[WS] No channelId provided", "user", claims.Subject, "from", remoteAddr)
 		http.Error(w, "channelId required", http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("[WS] Attempting to join channel: %s (user: %s, userName: %s)", channelId, claims.Subject, claims.GivenName)
+	slog.Debug("[WS] Attempting to join channel", "channel", channelId, "user", claims.Subject, "userName", claims.GivenName)
 
 	// TODO: Verify user has access to this channel
 	// Could call Next.js API or query Postgres directly
@@ -51,11 +51,11 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	// Upgrade to WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("[WS] Failed to upgrade connection (user: %s, channel: %s): %v", claims.Subject, channelId, err)
+		slog.Error("[WS] Failed to upgrade connection", "user", claims.Subject, "channel", channelId, "error", err)
 		return
 	}
 
-	log.Printf("[WS] Connection upgraded successfully (user: %s, channel: %s)", claims.Subject, channelId)
+	slog.Info("[WS] Connection upgraded successfully", "user", claims.Subject, "channel", channelId)
 
 	client := &Client{
 		hub:       hub,
@@ -66,11 +66,11 @@ func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
 		userName:  claims.GivenName,
 	}
 
-	log.Printf("[WS] Client created, sending register request (user: %s, channel: %s)", client.userId, client.channelId)
+	slog.Debug("[WS] Client created, sending register request", "user", client.userId, "channel", client.channelId)
 	client.hub.register <- client
 
 	// Start goroutines for read/write
-	log.Printf("[WS] Starting WritePump and ReadPump goroutines (user: %s, channel: %s)", client.userId, client.channelId)
+	slog.Debug("[WS] Starting WritePump and ReadPump goroutines", "user", client.userId, "channel", client.channelId)
 	go client.WritePump()
 	go client.ReadPump()
 }

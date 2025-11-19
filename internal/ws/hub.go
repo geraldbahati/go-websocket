@@ -2,9 +2,12 @@ package ws
 
 import (
 	"go-websocket/internal/models"
-	"log"
+	"hash/fnv"
+	"log/slog"
 	"sync"
 )
+
+const numBuckets = 32
 
 // RedisPublisher defines the interface for publishing events to Redis
 type RedisPublisher interface {
@@ -14,14 +17,14 @@ type RedisPublisher interface {
 	PublishTypingStop(channelId, userId string) error
 }
 
+type bucket struct {
+	sync.RWMutex
+	channels map[string]map[*Client]bool
+}
+
 // Hub maintains active WebSocket connections and broadcasts messages
 type Hub struct {
-	// Registered clients by channel ID
-	// Map: channelId -> Set of clients
-	channels map[string]map[*Client]bool
-
-	// Lock for thread-safe access
-	mu sync.RWMutex
+	buckets [numBuckets]*bucket
 
 	// Register requests from clients
 	register chan *Client
@@ -37,94 +40,120 @@ type Hub struct {
 }
 
 func NewHub(redisClient RedisPublisher) *Hub {
-	return &Hub{
-		channels:    make(map[string]map[*Client]bool),
+	h := &Hub{
 		register:    make(chan *Client),
 		unregister:  make(chan *Client),
 		Broadcast:   make(chan *models.BroadcastMessage),
 		redisClient: redisClient,
 	}
+
+	for i := 0; i < numBuckets; i++ {
+		h.buckets[i] = &bucket{
+			channels: make(map[string]map[*Client]bool),
+		}
+	}
+
+	return h
+}
+
+func (h *Hub) getBucket(channelId string) *bucket {
+	hash := fnv.New32a()
+	hash.Write([]byte(channelId))
+	return h.buckets[hash.Sum32()%numBuckets]
 }
 
 func (h *Hub) Run() {
-	log.Println("[HUB] Starting hub event loop")
+	slog.Info("[HUB] Starting hub event loop", "buckets", numBuckets)
 	for {
 		select {
 		case client := <-h.register:
-			log.Printf("[HUB] Received register request for client (user: %s, channel: %s)", client.userId, client.channelId)
+			slog.Debug("[HUB] Received register request", "user", client.userId, "channel", client.channelId)
 			h.registerClient(client)
 
 		case client := <-h.unregister:
-			log.Printf("[HUB] Received unregister request for client (user: %s, channel: %s)", client.userId, client.channelId)
+			slog.Debug("[HUB] Received unregister request", "user", client.userId, "channel", client.channelId)
 			h.unregisterClient(client)
 
 		case message := <-h.Broadcast:
-			log.Printf("[HUB] Received broadcast message for channel: %s (payload size: %d bytes)", message.ChannelId, len(message.Payload))
+			// Process broadcast in a separate goroutine to avoid blocking the main loop
+			// or just process it here if it's fast enough.
+			// With sharding, we can potentially parallelize this if needed,
+			// but for now, let's keep it simple but safe.
 			h.broadcastToChannel(message)
 		}
 	}
 }
 
 func (h *Hub) registerClient(client *Client) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	b := h.getBucket(client.channelId)
+	b.Lock()
 
-	if h.channels[client.channelId] == nil {
-		log.Printf("[HUB] Creating new channel: %s", client.channelId)
-		h.channels[client.channelId] = make(map[*Client]bool)
+	if b.channels[client.channelId] == nil {
+		slog.Debug("[HUB] Creating new channel", "channel", client.channelId)
+		b.channels[client.channelId] = make(map[*Client]bool)
 	}
-	h.channels[client.channelId][client] = true
+	b.channels[client.channelId][client] = true
 
-	clientCount := len(h.channels[client.channelId])
-	log.Printf("[HUB] Client registered (user: %s, userName: %s, channel: %s). Channel now has %d client(s)",
-		client.userId, client.userName, client.channelId, clientCount)
+	clientCount := len(b.channels[client.channelId])
+	slog.Info("[HUB] Client registered", "user", client.userId, "channel", client.channelId, "clientCount", clientCount)
 
-	// Emit presence:join event
+	// Release lock before publishing to Redis
+	b.Unlock()
+
+	// Publish presence:join event synchronously (but outside the lock)
+	// This ensures strict ordering for the same client without holding the lock during network I/O
 	if err := h.redisClient.PublishPresenceJoin(client.channelId, client.userId, client.userName); err != nil {
-		log.Printf("[HUB] Error publishing presence:join event: %v", err)
+		slog.Error("[HUB] Error publishing presence:join event", "error", err, "channel", client.channelId)
 	} else {
-		log.Printf("[HUB] Published presence:join event (user: %s, channel: %s)", client.userId, client.channelId)
+		slog.Debug("[HUB] Published presence:join event", "user", client.userId, "channel", client.channelId)
 	}
 }
 
 func (h *Hub) unregisterClient(client *Client) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	b := h.getBucket(client.channelId)
+	b.Lock()
 
-	if clients, ok := h.channels[client.channelId]; ok {
+	shouldPublishLeave := false
+	if clients, ok := b.channels[client.channelId]; ok {
 		if _, ok := clients[client]; ok {
 			delete(clients, client)
 			close(client.send)
 
 			clientCount := len(clients)
-			log.Printf("[HUB] Client unregistered (user: %s, channel: %s). Channel now has %d client(s)",
-				client.userId, client.channelId, clientCount)
+			slog.Info("[HUB] Client unregistered", "user", client.userId, "channel", client.channelId, "clientCount", clientCount)
 
 			// Clean up empty channels
 			if clientCount == 0 {
-				log.Printf("[HUB] Channel %s is now empty, removing from hub", client.channelId)
-				delete(h.channels, client.channelId)
+				slog.Debug("[HUB] Channel is now empty, removing from hub", "channel", client.channelId)
+				delete(b.channels, client.channelId)
 			}
 
-			// Emit presence:leave event
-			if err := h.redisClient.PublishPresenceLeave(client.channelId, client.userId); err != nil {
-				log.Printf("[HUB] Error publishing presence:leave event: %v", err)
-			} else {
-				log.Printf("[HUB] Published presence:leave event (user: %s, channel: %s)", client.userId, client.channelId)
-			}
+			shouldPublishLeave = true
 		}
-	} else {
-		log.Printf("[HUB] Warning: Attempted to unregister client from non-existent channel: %s", client.channelId)
+	}
+
+	// Release lock before publishing to Redis
+	b.Unlock()
+
+	// Publish presence:leave event synchronously (but outside the lock)
+	// This ensures strict ordering for the same client without holding the lock during network I/O
+	if shouldPublishLeave {
+		if err := h.redisClient.PublishPresenceLeave(client.channelId, client.userId); err != nil {
+			slog.Error("[HUB] Error publishing presence:leave event", "error", err, "channel", client.channelId)
+		} else {
+			slog.Debug("[HUB] Published presence:leave event", "user", client.userId, "channel", client.channelId)
+		}
 	}
 }
 
 func (h *Hub) broadcastToChannel(message *models.BroadcastMessage) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	b := h.getBucket(message.ChannelId)
+	b.RLock()
+	defer b.RUnlock()
 
-	if clients, ok := h.channels[message.ChannelId]; ok {
-		clientCount := len(clients)
-		log.Printf("[HUB] Broadcasting to channel %s (%d client(s))", message.ChannelId, clientCount)
+	if clients, ok := b.channels[message.ChannelId]; ok {
+		// clientCount := len(clients)
+		// slog.Debug("[HUB] Broadcasting to channel", "channel", message.ChannelId, "clientCount", clientCount)
 
 		sentCount := 0
 		failedCount := 0
@@ -135,30 +164,30 @@ func (h *Hub) broadcastToChannel(message *models.BroadcastMessage) {
 				sentCount++
 			default:
 				// Client buffer full, disconnect
-				log.Printf("[HUB] Client buffer full, disconnecting (user: %s, channel: %s)", client.userId, client.channelId)
+				slog.Warn("[HUB] Client buffer full, disconnecting", "user", client.userId, "channel", client.channelId)
 				close(client.send)
 				delete(clients, client)
 				failedCount++
 			}
 		}
 
-		log.Printf("[HUB] Broadcast complete for channel %s: sent=%d, failed=%d", message.ChannelId, sentCount, failedCount)
+		// slog.Debug("[HUB] Broadcast complete", "channel", message.ChannelId, "sent", sentCount, "failed", failedCount)
 	} else {
-		log.Printf("[HUB] No clients connected to channel: %s", message.ChannelId)
+		// slog.Debug("[HUB] No clients connected to channel", "channel", message.ChannelId)
 	}
 }
 
 // GetChannelUsers returns list of connected users in a channel
 func (h *Hub) GetChannelUsers(channelId string) []string {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	b := h.getBucket(channelId)
+	b.RLock()
+	defer b.RUnlock()
 
 	users := []string{}
-	if clients, ok := h.channels[channelId]; ok {
+	if clients, ok := b.channels[channelId]; ok {
 		for client := range clients {
 			users = append(users, client.userId)
 		}
 	}
-	log.Printf("[HUB] GetChannelUsers for channel %s: %d user(s)", channelId, len(users))
 	return users
 }
