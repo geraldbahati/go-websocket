@@ -56,28 +56,42 @@ func (c *Client) PublishMessageCreated(channelId string, message interface{}) er
 	return c.publishEvent(channelId, event)
 }
 
-func (c *Client) PublishTypingStart(channelId, userId, userName string) error {
+func (c *Client) PublishTypingStart(channelId, userId, userName string, threadId *string) error {
+	data := map[string]interface{}{
+		"userId":   userId,
+		"userName": userName,
+	}
+
+	// Include threadId if provided
+	if threadId != nil && *threadId != "" {
+		data["threadId"] = *threadId
+	}
+
 	event := models.Event{
 		Type:      "typing:start",
 		ChannelId: channelId,
 		Timestamp: time.Now().Unix(),
-		Data: map[string]string{
-			"userId":   userId,
-			"userName": userName,
-		},
+		Data:      data,
 	}
 
 	return c.publishEvent(channelId, event)
 }
 
-func (c *Client) PublishTypingStop(channelId, userId string) error {
+func (c *Client) PublishTypingStop(channelId, userId string, threadId *string) error {
+	data := map[string]interface{}{
+		"userId": userId,
+	}
+
+	// Include threadId if provided
+	if threadId != nil && *threadId != "" {
+		data["threadId"] = *threadId
+	}
+
 	event := models.Event{
 		Type:      "typing:stop",
 		ChannelId: channelId,
 		Timestamp: time.Now().Unix(),
-		Data: map[string]string{
-			"userId": userId,
-		},
+		Data:      data,
 	}
 
 	return c.publishEvent(channelId, event)
@@ -113,22 +127,16 @@ func (c *Client) PublishPresenceLeave(channelId, userId string) error {
 func (c *Client) publishEvent(channelId string, event models.Event) error {
 	payload, err := json.Marshal(event)
 	if err != nil {
-		slog.Error("[REDIS] Error marshaling event", "type", event.Type, "channel", channelId, "error", err)
+		slog.Error("[REDIS] Failed to marshal event", "type", event.Type, "channel", channelId, "error", err)
 		return err
 	}
 
-	// Publish to channel-specific Redis channel
 	channel := "channel:" + channelId
-	// slog.Debug("[REDIS] Publishing event", "type", event.Type, "channel", channel, "size", len(payload))
-
 	result := c.rdb.Publish(c.ctx, channel, payload)
 	if err := result.Err(); err != nil {
-		slog.Error("[REDIS] Error publishing event", "type", event.Type, "channel", channel, "error", err)
+		slog.Error("[REDIS] Failed to publish event", "type", event.Type, "channel", channel, "error", err)
 		return err
 	}
-
-	// subscribers := result.Val()
-	// slog.Debug("[REDIS] Event published successfully", "type", event.Type, "channel", channel, "subscribers", subscribers)
 
 	return nil
 }

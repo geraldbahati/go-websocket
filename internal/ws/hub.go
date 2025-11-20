@@ -12,8 +12,8 @@ const numBuckets = 32
 type RedisPublisher interface {
 	PublishPresenceJoin(channelId, userId, userName string) error
 	PublishPresenceLeave(channelId, userId string) error
-	PublishTypingStart(channelId, userId, userName string) error
-	PublishTypingStop(channelId, userId string) error
+	PublishTypingStart(channelId, userId, userName string, threadId *string) error
+	PublishTypingStop(channelId, userId string, threadId *string) error
 }
 
 type bucket struct {
@@ -56,15 +56,13 @@ func (h *Hub) getBucket(channelId string) *bucket {
 }
 
 func (h *Hub) Run() {
-	slog.Info("[HUB] Starting hub event loop", "buckets", numBuckets)
+	slog.Info("[HUB] Started event loop", "buckets", numBuckets)
 	for {
 		select {
 		case client := <-h.register:
-			slog.Debug("[HUB] Received register request", "user", client.userId, "channel", client.channelId)
 			h.registerClient(client)
 
 		case client := <-h.unregister:
-			slog.Debug("[HUB] Received unregister request", "user", client.userId, "channel", client.channelId)
 			h.unregisterClient(client)
 
 		case message := <-h.Broadcast:
@@ -72,7 +70,7 @@ func (h *Hub) Run() {
 			select {
 			case b.broadcast <- message:
 			default:
-				slog.Warn("[HUB] Bucket broadcast channel full, dropping message", "channel", message.ChannelId)
+				slog.Warn("[HUB] Broadcast channel full, dropping message", "channel", message.ChannelId)
 			}
 		}
 	}
@@ -94,20 +92,17 @@ func (h *Hub) registerClient(client *Client) {
 	b.Lock()
 
 	if b.channels[client.channelId] == nil {
-		slog.Debug("[HUB] Creating new channel", "channel", client.channelId)
 		b.channels[client.channelId] = make(map[*Client]bool)
 	}
 	b.channels[client.channelId][client] = true
 
 	clientCount := len(b.channels[client.channelId])
-	slog.Info("[HUB] Client registered", "user", client.userId, "channel", client.channelId, "clientCount", clientCount)
+	slog.Info("[HUB] Client registered", "user", client.userId, "channel", client.channelId, "clients", clientCount)
 
 	b.Unlock()
 
 	if err := h.redisClient.PublishPresenceJoin(client.channelId, client.userId, client.userName); err != nil {
-		slog.Error("[HUB] Error publishing presence:join event", "error", err, "channel", client.channelId)
-	} else {
-		slog.Debug("[HUB] Published presence:join event", "user", client.userId, "channel", client.channelId)
+		slog.Error("[HUB] Failed to publish presence:join", "user", client.userId, "channel", client.channelId, "error", err)
 	}
 }
 
@@ -122,11 +117,9 @@ func (h *Hub) unregisterClient(client *Client) {
 			close(client.send)
 
 			clientCount := len(clients)
-			slog.Info("[HUB] Client unregistered", "user", client.userId, "channel", client.channelId, "clientCount", clientCount)
+			slog.Info("[HUB] Client unregistered", "user", client.userId, "channel", client.channelId, "clients", clientCount)
 
-			// Clean up empty channels
 			if clientCount == 0 {
-				slog.Debug("[HUB] Channel is now empty, removing from hub", "channel", client.channelId)
 				delete(b.channels, client.channelId)
 			}
 
@@ -135,11 +128,10 @@ func (h *Hub) unregisterClient(client *Client) {
 	}
 
 	b.Unlock()
+
 	if shouldPublishLeave {
 		if err := h.redisClient.PublishPresenceLeave(client.channelId, client.userId); err != nil {
-			slog.Error("[HUB] Error publishing presence:leave event", "error", err, "channel", client.channelId)
-		} else {
-			slog.Debug("[HUB] Published presence:leave event", "user", client.userId, "channel", client.channelId)
+			slog.Error("[HUB] Failed to publish presence:leave", "user", client.userId, "channel", client.channelId, "error", err)
 		}
 	}
 }
@@ -150,28 +142,15 @@ func (h *Hub) broadcastToChannel(message *models.BroadcastMessage) {
 	defer b.RUnlock()
 
 	if clients, ok := b.channels[message.ChannelId]; ok {
-		// clientCount := len(clients)
-		// slog.Debug("[HUB] Broadcasting to channel", "channel", message.ChannelId, "clientCount", clientCount)
-
-		sentCount := 0
-		failedCount := 0
-
 		for client := range clients {
 			select {
 			case client.send <- message.Payload:
-				sentCount++
 			default:
-				// Client buffer full, disconnect
 				slog.Warn("[HUB] Client buffer full, disconnecting", "user", client.userId, "channel", client.channelId)
 				close(client.send)
 				delete(clients, client)
-				failedCount++
 			}
 		}
-
-		// slog.Debug("[HUB] Broadcast complete", "channel", message.ChannelId, "sent", sentCount, "failed", failedCount)
-	} else {
-		// slog.Debug("[HUB] No clients connected to channel", "channel", message.ChannelId)
 	}
 }
 
